@@ -56,7 +56,6 @@ from xml.sax.saxutils import escape as xml_escape
 import urlparse
 from xml.dom.minidom import parseString
 
-from webob import Request, Response
 from simplejson import loads
 import email.utils
 import datetime
@@ -65,6 +64,7 @@ import re
 from swift.common.utils import split_path
 from swift.common.utils import get_logger
 from swift.common.wsgi import WSGIContext
+from swift.common.swob import Request, Response
 from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
     HTTP_NO_CONTENT, HTTP_BAD_REQUEST, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, \
     HTTP_NOT_FOUND, HTTP_CONFLICT, HTTP_UNPROCESSABLE_ENTITY, is_success, \
@@ -112,7 +112,10 @@ def get_err_response(code):
         (HTTP_NOT_IMPLEMENTED, 'The feature you requested is not yet'
         ' implemented'),
         'MissingContentLength':
-        (HTTP_LENGTH_REQUIRED, 'Length Required')}
+        (HTTP_LENGTH_REQUIRED, 'Length Required'),
+        'IllegalVersioningConfigurationException':
+            (HTTP_BAD_REQUEST, 'The specified versioning configuration '
+                               'invalid')}
 
     resp = Response(content_type='text/xml')
     resp.status = error_table[code][0]
@@ -263,12 +266,14 @@ def canonical_string(req):
     for k in sorted(key.lower() for key in amz_headers):
         buf += "%s:%s\n" % (k, amz_headers[k])
 
-    path = req.path_qs
+    path = req.path
+    if req.query_string:
+        path += '?' + req.query_string
     if '?' in path:
         path, args = path.split('?', 1)
         for key in urlparse.parse_qs(args, keep_blank_values=True):
-            if key in ('acl', 'logging', 'torrent', 'location',
-                       'requestPayment'):
+            if key in ('acl', 'logging', 'torrent', 'location', 'versions',
+                       'requestPayment', 'versioning'):
                 return "%s%s?%s" % (buf, path, key)
     return buf + path
 
@@ -364,7 +369,7 @@ class ServiceController(WSGIContext):
         status = self._get_status_int()
 
         if status != HTTP_OK:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             else:
                 return get_err_response('InvalidURI')
@@ -372,12 +377,18 @@ class ServiceController(WSGIContext):
         containers = loads(''.join(list(body_iter)))
         # we don't keep the creation time of a backet (s3cmd doesn't
         # work without that) so we use something bogus.
+        if containers:
+            owner = containers[0].get('owner', '')
+        else:
+            owner = ''
         body = '<?xml version="1.0" encoding="UTF-8"?>' \
                '<ListAllMyBucketsResult ' \
-               'xmlns="http://doc.s3.amazonaws.com/2006-03-01">' \
+               'xmlns="http://doc.s3.amazonaws.com/2006-03-01">'\
+               '<Owner><ID>%s</ID><DisplayName>%s</DisplayName></Owner>'\
                '<Buckets>%s</Buckets>' \
                '</ListAllMyBucketsResult>' \
-               % ("".join(['<Bucket><Name>%s</Name><CreationDate>'
+               % (xml_escape(owner), xml_escape(owner),
+                  "".join(['<Bucket><Name>%s</Name><CreationDate>'
                            '2009-02-03T16:45:09.000Z</CreationDate></Bucket>'
                            % xml_escape(i['name']) for i in containers]))
         resp = Response(status=HTTP_OK, content_type='application/xml',
@@ -396,6 +407,8 @@ class BucketController(WSGIContext):
         self.account_name = unquote(account_name)
         env['HTTP_X_AUTH_TOKEN'] = token
         env['PATH_INFO'] = '/v1/%s/%s' % (account_name, container_name)
+        conf = kwargs.get('conf', {})
+        self.location = conf.get('location', 'US')
 
     def GET(self, env, start_response):
         """
@@ -414,7 +427,7 @@ class BucketController(WSGIContext):
                        MAX_BUCKET_LISTING)
 
         if 'acl' not in args:
-            #acl request sent with format=json etc confuses swift
+            # acl request sent with format=json etc confuses swift
             env['QUERY_STRING'] = 'format=json&limit=%s' % (max_keys + 1)
         if 'marker' in args:
             env['QUERY_STRING'] += '&marker=%s' % quote(args['marker'])
@@ -430,41 +443,135 @@ class BucketController(WSGIContext):
             return get_acl(self.account_name, headers)
 
         if status != HTTP_OK:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_NOT_FOUND:
                 return get_err_response('NoSuchBucket')
             else:
                 return get_err_response('InvalidURI')
 
+        if 'location' in args:
+            body = ('<?xml version="1.0" encoding="UTF-8"?>'
+                    '<LocationConstraint '
+                    'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"')
+            if self.location == 'US':
+                body += '/>'
+            else:
+                body += ('>%s</LocationConstraint>' % self.location)
+            return Response(body=body, content_type='application/xml')
+
+        if 'versioning' in args:
+            vers = self._response_header_value('x-container-versioning') or ''
+            body = (
+                '<VersioningConfiguration '
+                        'xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                '<Status>%s</Status></VersioningConfiguration>' %
+                vers.capitalize())
+            return Response(body=body, content_type='application/xml')
+
+        if 'logging' in args:
+            # logging disabled
+            body = ('<?xml version="1.0" encoding="UTF-8"?>'
+                    '<BucketLoggingStatus '
+                    'xmlns="http://doc.s3.amazonaws.com/2006-03-01" />')
+            return Response(body=body, content_type='application/xml')
+
         objects = loads(''.join(list(body_iter)))
-        body = ('<?xml version="1.0" encoding="UTF-8"?>'
+        if 'versions' in args:
+            obj_list = []
+            for obj in objects:
+                if 'subdir' not in obj:
+                    if not obj['deleted']:
+                        obj_list.append(
+                            '<Version>'
+                                '<Key>%s</Key>'
+                                '<VersionId>%s</VersionId>'
+                                '<IsLatest>%s</IsLatest>'
+                                '<LastModified>%s</LastModified>'
+                                '<ETag>&quot;%s&quot;</ETag>'
+                                '<Size>%s</Size>'
+                                '<StorageClass>STANDARD</StorageClass>'
+                                '<Owner>'
+                                    '<ID>%s</ID>'
+                                    '<DisplayName>%s</DisplayName>'
+                                '</Owner>'
+                            '</Version>' % (
+                                unquote(obj['name']), obj['version_id'],
+                                'true' if obj['latest'] else 'false',
+                                obj['last_modified'], obj['hash'],
+                                obj['bytes'], obj['owner'], obj['owner']
+                            ))
+                    else:
+                        obj_list.append(
+                            '<DeleteMarker>'
+                                '<Key>%s</Key>'
+                                '<VersionId>%s</VersionId>'
+                                '<IsLatest>%s</IsLatest>'
+                                '<LastModified>%s</LastModified>'
+                            '</DeleteMarker>' % (
+                                obj['name'], obj['version_id'],
+                                'true' if obj['latest'] else 'false',
+                                obj['last_modified']
+                            ))
+            body = ('<?xml version="1.0" encoding="UTF-8"?>'
+                '<ListVersionsResult '
+                        'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
+                    '<Prefix>%s</Prefix>'
+                    '<KeyMarker>%s</KeyMarker>'
+                    '<VersionIdMarker>%s</VersionIdMarker>'
+                    '<Delimiter>%s</Delimiter>'
+                    '<IsTruncated>%s</IsTruncated>'
+                    '<MaxKeys>%s</MaxKeys>'
+                    '<Name>%s</Name>'
+                    '%s'
+                    '%s'
+                '</ListVersionsResult>' % (
+                xml_escape(args.get('prefix', '')),
+                xml_escape(args.get('key-marker', '')),
+                xml_escape(args.get('version-id-marker', '')),
+                xml_escape(args.get('delimiter', '')),
+                'true' if len(objects) == (max_keys + 1) else 'false',
+                max_keys,
+                xml_escape(self.container_name),
+                "".join(obj_list),
+                "".join(['<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>'
+                         % xml_escape(i['subdir'])
+                         for i in objects[:max_keys] if 'subdir' in i])))
+        else:
+            body = ('<?xml version="1.0" encoding="UTF-8"?>'
                 '<ListBucketResult '
-                'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
-                '<Prefix>%s</Prefix>'
-                '<Marker>%s</Marker>'
-                '<Delimiter>%s</Delimiter>'
-                '<IsTruncated>%s</IsTruncated>'
-                '<MaxKeys>%s</MaxKeys>'
-                '<Name>%s</Name>'
-                '%s'
-                '%s'
-                '</ListBucketResult>' %
-                (
+                    'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
+                    '<Prefix>%s</Prefix>'
+                    '<Marker>%s</Marker>'
+                    '<Delimiter>%s</Delimiter>'
+                    '<IsTruncated>%s</IsTruncated>'
+                    '<MaxKeys>%s</MaxKeys>'
+                    '<Name>%s</Name>'
+                    '%s'
+                    '%s'
+                '</ListBucketResult>' % (
                 xml_escape(args.get('prefix', '')),
                 xml_escape(args.get('marker', '')),
                 xml_escape(args.get('delimiter', '')),
-                'true' if max_keys > 0 and len(objects) == (max_keys + 1) else
-                'false',
+                'true' if max_keys > 0 and
+                          len(objects) == (max_keys + 1) else 'false',
                 max_keys,
                 xml_escape(self.container_name),
-                "".join(['<Contents><Key>%s</Key><LastModified>%sZ</LastModif'
-                        'ied><ETag>%s</ETag><Size>%s</Size><StorageClass>STA'
-                        'NDARD</StorageClass><Owner><ID>%s</ID><DisplayName>'
-                        '%s</DisplayName></Owner></Contents>' %
+                "".join(['<Contents>'
+                             '<Key>%s</Key>'
+                             '<LastModified>%sZ</LastModified>'
+                             '<ETag>%s</ETag>'
+                             '<Size>%s</Size>'
+                             '<StorageClass>STANDARD</StorageClass>'
+                             '<Owner>'
+                                 '<ID>%s</ID>'
+                                 '<DisplayName>%s</DisplayName>'
+                             '</Owner>'
+                         '</Contents>' %
                         (xml_escape(unquote(i['name'])), i['last_modified'],
-                         i['hash'],
-                         i['bytes'], self.account_name, self.account_name)
+                         i['hash'], i['bytes'],
+                         i.get('owner', self.account_name),
+                         i.get('owner', self.account_name))
                          for i in objects[:max_keys] if 'subdir' not in i]),
                 "".join(['<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>'
                          % xml_escape(i['subdir'])
@@ -475,6 +582,7 @@ class BucketController(WSGIContext):
         """
         Handle PUT Bucket request
         """
+        versioning = False
         for key, value in env.items():
             if key == "HTTP_X_AMZ_ACL":
                 # Translate the Amazon ACL to something that can be
@@ -511,12 +619,27 @@ class BucketController(WSGIContext):
                     for header, acl in translated_acl:
                         env[header] = acl
                     env['REQUEST_METHOD'] = 'POST'
+                    env['QUERY_STRING'] = 'acl'
+                if 'versioning' in args:
+                    versioning = True
+                    if 'wsgi.input' not in env:
+                        return get_err_response(
+                            'IllegalVersioningConfigurationException')
+                    versioning_conf = env['wsgi.input'].read()
+                    if 'Enabled' in versioning_conf:
+                        env['HTTP_X_CONTAINER_VERSIONING'] = 'enabled'
+                    elif 'Suspended' in versioning_conf:
+                        env['HTTP_X_CONTAINER_VERSIONING'] = 'suspended'
+                    else:
+                        return get_err_response(
+                            'IllegalVersioningConfigurationException')
+                    env['REQUEST_METHOD'] = 'POST'
 
         body_iter = self._app_call(env)
         status = self._get_status_int()
 
         if status != HTTP_CREATED and status != HTTP_NO_CONTENT:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_ACCEPTED:
                 return get_err_response('BucketAlreadyExists')
@@ -524,7 +647,8 @@ class BucketController(WSGIContext):
                 return get_err_response('InvalidURI')
 
         resp = Response()
-        resp.headers.add('Location', self.container_name)
+        if not versioning:
+            resp.headers['Location'] = self.container_name
         resp.status = HTTP_OK
         return resp
 
@@ -536,7 +660,7 @@ class BucketController(WSGIContext):
         status = self._get_status_int()
 
         if status != HTTP_NO_CONTENT:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_NOT_FOUND:
                 return get_err_response('NoSuchBucket')
@@ -603,7 +727,7 @@ class ObjectController(WSGIContext):
                               'etag', 'last-modified'):
                     new_hdrs[key] = val
             return Response(status=status, headers=new_hdrs, app_iter=app_iter)
-        elif status == HTTP_UNAUTHORIZED:
+        elif status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
             return get_err_response('AccessDenied')
         elif status == HTTP_NOT_FOUND:
             return get_err_response('NoSuchKey')
@@ -646,7 +770,7 @@ class ObjectController(WSGIContext):
         status = self._get_status_int()
 
         if status != HTTP_CREATED:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_NOT_FOUND:
                 return get_err_response('NoSuchBucket')
@@ -671,7 +795,7 @@ class ObjectController(WSGIContext):
         status = self._get_status_int()
 
         if status != HTTP_NO_CONTENT:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_NOT_FOUND:
                 return get_err_response('NoSuchKey')
@@ -689,6 +813,7 @@ class Swift3Middleware(object):
         self.app = app
         self.conf = conf
         self.logger = get_logger(self.conf, log_route='swift3')
+        self.location = conf.get('location', 'US').upper()
 
     def get_controller(self, path):
         container, obj = split_path(path, 0, 2, True)
@@ -705,15 +830,15 @@ class Swift3Middleware(object):
         self.logger.debug('Calling Swift3 Middleware')
         self.logger.debug(req.__dict__)
 
-        if 'AWSAccessKeyId' in req.GET:
+        if 'AWSAccessKeyId' in req.params:
             try:
-                req.headers['Date'] = req.GET['Expires']
+                req.headers['Date'] = req.params['Expires']
                 req.headers['Authorization'] = \
-                    'AWS %(AWSAccessKeyId)s:%(Signature)s' % req.GET
+                    'AWS %(AWSAccessKeyId)s:%(Signature)s' % req.params
             except KeyError:
                 return get_err_response('InvalidArgument')(env, start_response)
 
-        if not 'Authorization' in req.headers:
+        if 'Authorization' not in req.headers:
             return self.app(env, start_response)
 
         try:
@@ -753,7 +878,8 @@ class Swift3Middleware(object):
 
         token = base64.urlsafe_b64encode(canonical_string(req))
 
-        controller = controller(env, self.app, account, token, **path_parts)
+        controller = controller(env, self.app, account, token, conf=self.conf,
+                                **path_parts)
 
         if hasattr(controller, req.method):
             res = getattr(controller, req.method)(env, start_response)
