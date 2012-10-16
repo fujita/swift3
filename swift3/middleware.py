@@ -434,7 +434,7 @@ class BucketController(WSGIContext):
             return get_acl(self.account_name, headers)
 
         if status != HTTP_OK:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_NOT_FOUND:
                 return get_err_response('NoSuchBucket')
@@ -530,7 +530,7 @@ class BucketController(WSGIContext):
         status = self._get_status_int()
 
         if status != HTTP_CREATED and status != HTTP_NO_CONTENT:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_ACCEPTED:
                 return get_err_response('BucketAlreadyExists')
