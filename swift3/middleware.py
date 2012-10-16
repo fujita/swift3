@@ -112,7 +112,10 @@ def get_err_response(code):
         (HTTP_NOT_IMPLEMENTED, 'The feature you requested is not yet'
         ' implemented'),
         'MissingContentLength':
-        (HTTP_LENGTH_REQUIRED, 'Length Required')}
+        (HTTP_LENGTH_REQUIRED, 'Length Required'),
+        'IllegalVersioningConfigurationException':
+            (HTTP_BAD_REQUEST, 'The specified versioning configuration '
+                               'invalid')}
 
     resp = Response(content_type='text/xml')
     resp.status = error_table[code][0]
@@ -424,7 +427,7 @@ class BucketController(WSGIContext):
                        MAX_BUCKET_LISTING)
 
         if 'acl' not in args:
-            #acl request sent with format=json etc confuses swift
+            # acl request sent with format=json etc confuses swift
             env['QUERY_STRING'] = 'format=json&limit=%s' % (max_keys + 1)
         if 'marker' in args:
             env['QUERY_STRING'] += '&marker=%s' % quote(args['marker'])
@@ -457,6 +460,15 @@ class BucketController(WSGIContext):
                 body += ('>%s</LocationConstraint>' % self.location)
             return Response(body=body, content_type='application/xml')
 
+        if 'versioning' in args:
+            vers = self._response_header_value('x-container-versioning') or ''
+            body = (
+                '<VersioningConfiguration '
+                        'xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                '<Status>%s</Status></VersioningConfiguration>' %
+                vers.capitalize())
+            return Response(body=body, content_type='application/xml')
+
         if 'logging' in args:
             # logging disabled
             body = ('<?xml version="1.0" encoding="UTF-8"?>'
@@ -465,33 +477,101 @@ class BucketController(WSGIContext):
             return Response(body=body, content_type='application/xml')
 
         objects = loads(''.join(list(body_iter)))
-        body = ('<?xml version="1.0" encoding="UTF-8"?>'
+        if 'versions' in args:
+            obj_list = []
+            for obj in objects:
+                if 'subdir' not in obj:
+                    if not obj['deleted']:
+                        obj_list.append(
+                            '<Version>'
+                                '<Key>%s</Key>'
+                                '<VersionId>%s</VersionId>'
+                                '<IsLatest>%s</IsLatest>'
+                                '<LastModified>%s</LastModified>'
+                                '<ETag>&quot;%s&quot;</ETag>'
+                                '<Size>%s</Size>'
+                                '<StorageClass>STANDARD</StorageClass>'
+                                '<Owner>'
+                                    '<ID>%s</ID>'
+                                    '<DisplayName>%s</DisplayName>'
+                                '</Owner>'
+                            '</Version>' % (
+                                unquote(obj['name']), obj['version_id'],
+                                'true' if obj['latest'] else 'false',
+                                obj['last_modified'], obj['hash'],
+                                obj['bytes'], obj['owner'], obj['owner']
+                            ))
+                    else:
+                        obj_list.append(
+                            '<DeleteMarker>'
+                                '<Key>%s</Key>'
+                                '<VersionId>%s</VersionId>'
+                                '<IsLatest>%s</IsLatest>'
+                                '<LastModified>%s</LastModified>'
+                            '</DeleteMarker>' % (
+                                obj['name'], obj['version_id'],
+                                'true' if obj['latest'] else 'false',
+                                obj['last_modified']
+                            ))
+            body = ('<?xml version="1.0" encoding="UTF-8"?>'
+                '<ListVersionsResult '
+                        'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
+                    '<Prefix>%s</Prefix>'
+                    '<KeyMarker>%s</KeyMarker>'
+                    '<VersionIdMarker>%s</VersionIdMarker>'
+                    '<Delimiter>%s</Delimiter>'
+                    '<IsTruncated>%s</IsTruncated>'
+                    '<MaxKeys>%s</MaxKeys>'
+                    '<Name>%s</Name>'
+                    '%s'
+                    '%s'
+                '</ListVersionsResult>' % (
+                xml_escape(args.get('prefix', '')),
+                xml_escape(args.get('key-marker', '')),
+                xml_escape(args.get('version-id-marker', '')),
+                xml_escape(args.get('delimiter', '')),
+                'true' if len(objects) == (max_keys + 1) else 'false',
+                max_keys,
+                xml_escape(self.container_name),
+                "".join(obj_list),
+                "".join(['<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>'
+                         % xml_escape(i['subdir'])
+                         for i in objects[:max_keys] if 'subdir' in i])))
+        else:
+            body = ('<?xml version="1.0" encoding="UTF-8"?>'
                 '<ListBucketResult '
-                'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
-                '<Prefix>%s</Prefix>'
-                '<Marker>%s</Marker>'
-                '<Delimiter>%s</Delimiter>'
-                '<IsTruncated>%s</IsTruncated>'
-                '<MaxKeys>%s</MaxKeys>'
-                '<Name>%s</Name>'
-                '%s'
-                '%s'
-                '</ListBucketResult>' %
-                (
+                    'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
+                    '<Prefix>%s</Prefix>'
+                    '<Marker>%s</Marker>'
+                    '<Delimiter>%s</Delimiter>'
+                    '<IsTruncated>%s</IsTruncated>'
+                    '<MaxKeys>%s</MaxKeys>'
+                    '<Name>%s</Name>'
+                    '%s'
+                    '%s'
+                '</ListBucketResult>' % (
                 xml_escape(args.get('prefix', '')),
                 xml_escape(args.get('marker', '')),
                 xml_escape(args.get('delimiter', '')),
-                'true' if max_keys > 0 and len(objects) == (max_keys + 1) else
-                'false',
+                'true' if max_keys > 0 and
+                          len(objects) == (max_keys + 1) else 'false',
                 max_keys,
                 xml_escape(self.container_name),
-                "".join(['<Contents><Key>%s</Key><LastModified>%sZ</LastModif'
-                        'ied><ETag>%s</ETag><Size>%s</Size><StorageClass>STA'
-                        'NDARD</StorageClass><Owner><ID>%s</ID><DisplayName>'
-                        '%s</DisplayName></Owner></Contents>' %
+                "".join(['<Contents>'
+                             '<Key>%s</Key>'
+                             '<LastModified>%sZ</LastModified>'
+                             '<ETag>%s</ETag>'
+                             '<Size>%s</Size>'
+                             '<StorageClass>STANDARD</StorageClass>'
+                             '<Owner>'
+                                 '<ID>%s</ID>'
+                                 '<DisplayName>%s</DisplayName>'
+                             '</Owner>'
+                         '</Contents>' %
                         (xml_escape(unquote(i['name'])), i['last_modified'],
-                         i['hash'],
-                         i['bytes'], self.account_name, self.account_name)
+                         i['hash'], i['bytes'],
+                         i.get('owner', self.account_name),
+                         i.get('owner', self.account_name))
                          for i in objects[:max_keys] if 'subdir' not in i]),
                 "".join(['<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>'
                          % xml_escape(i['subdir'])
@@ -502,6 +582,7 @@ class BucketController(WSGIContext):
         """
         Handle PUT Bucket request
         """
+        versioning = False
         for key, value in env.items():
             if key == "HTTP_X_AMZ_ACL":
                 # Translate the Amazon ACL to something that can be
@@ -538,6 +619,21 @@ class BucketController(WSGIContext):
                     for header, acl in translated_acl:
                         env[header] = acl
                     env['REQUEST_METHOD'] = 'POST'
+                    env['QUERY_STRING'] = 'acl'
+                if 'versioning' in args:
+                    versioning = True
+                    if 'wsgi.input' not in env:
+                        return get_err_response(
+                            'IllegalVersioningConfigurationException')
+                    versioning_conf = env['wsgi.input'].read()
+                    if 'Enabled' in versioning_conf:
+                        env['HTTP_X_CONTAINER_VERSIONING'] = 'enabled'
+                    elif 'Suspended' in versioning_conf:
+                        env['HTTP_X_CONTAINER_VERSIONING'] = 'suspended'
+                    else:
+                        return get_err_response(
+                            'IllegalVersioningConfigurationException')
+                    env['REQUEST_METHOD'] = 'POST'
 
         body_iter = self._app_call(env)
         status = self._get_status_int()
@@ -551,7 +647,8 @@ class BucketController(WSGIContext):
                 return get_err_response('InvalidURI')
 
         resp = Response()
-        resp.headers['Location'] = self.container_name
+        if not versioning:
+            resp.headers['Location'] = self.container_name
         resp.status = HTTP_OK
         return resp
 
