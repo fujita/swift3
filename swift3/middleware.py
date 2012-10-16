@@ -374,12 +374,18 @@ class ServiceController(WSGIContext):
         containers = loads(''.join(list(body_iter)))
         # we don't keep the creation time of a backet (s3cmd doesn't
         # work without that) so we use something bogus.
+        if containers:
+            owner = containers[0].get('owner', '')
+        else:
+            owner = ''
         body = '<?xml version="1.0" encoding="UTF-8"?>' \
                '<ListAllMyBucketsResult ' \
-               'xmlns="http://doc.s3.amazonaws.com/2006-03-01">' \
+               'xmlns="http://doc.s3.amazonaws.com/2006-03-01">'\
+               '<Owner><ID>%s</ID><DisplayName>%s</DisplayName></Owner>'\
                '<Buckets>%s</Buckets>' \
                '</ListAllMyBucketsResult>' \
-               % ("".join(['<Bucket><Name>%s</Name><CreationDate>'
+               % (xml_escape(owner), xml_escape(owner),
+                  "".join(['<Bucket><Name>%s</Name><CreationDate>'
                            '2009-02-03T16:45:09.000Z</CreationDate></Bucket>'
                            % xml_escape(i['name']) for i in containers]))
         resp = Response(status=HTTP_OK, content_type='application/xml',
