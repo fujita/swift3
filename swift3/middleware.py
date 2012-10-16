@@ -272,8 +272,8 @@ def canonical_string(req):
     if '?' in path:
         path, args = path.split('?', 1)
         for key in urlparse.parse_qs(args, keep_blank_values=True):
-            if key in ('acl', 'logging', 'torrent', 'location',
-                       'requestPayment'):
+            if key in ('acl', 'logging', 'torrent', 'location', 'versions',
+                       'requestPayment', 'versioning'):
                 return "%s%s?%s" % (buf, path, key)
     return buf + path
 
