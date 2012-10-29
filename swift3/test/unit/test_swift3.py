@@ -21,9 +21,14 @@ import hashlib
 import xml.dom.minidom
 import simplejson
 
-from swift.common.swob import Request, Response, HTTPUnauthorized, \
-    HTTPCreated,HTTPNoContent, HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
-    HTTPConflict
+try:
+    from swift.common.swob import Request, Response, HTTPUnauthorized,\
+        HTTPCreated, HTTPNoContent, HTTPAccepted, HTTPBadRequest,\
+        HTTPNotFound, HTTPConflict
+except ImportError:
+    from webob import Request, Response
+    from webob.exc import HTTPUnauthorized, HTTPCreated, HTTPNoContent,\
+        HTTPAccepted, HTTPBadRequest, HTTPNotFound, HTTPConflict
 
 from swift3 import middleware as swift3
 
