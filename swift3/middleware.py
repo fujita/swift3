@@ -288,7 +288,7 @@ def canonical_string(req, alt=False):
     return buf + path
 
 
-def swift_acl_translate(acl, group='', user='', xml=False):
+def swift_acl_translate(acl, slogger, group='', user='', xml=False):
     """
     Takes an S3 style ACL and returns a list of header/value pairs that
     implement that ACL in Swift, or "Unsupported" if there isn't a way to do
@@ -323,10 +323,19 @@ def swift_acl_translate(acl, group='', user='', xml=False):
             elif permission == "READ" and grantee == 'Group' and\
                     acl != 'public-read-write':
                 acl = 'public-read'
+                # The only thing this middleware supports at the moment is public-read
+                # or private, so we break out of this loop if we detect that it's public-read.
+                # Otherwise it's just private.
+                # I added this as it would error out if it read in the first GRANT as public-read, then read the
+                # second one as FULL_CONTROL for CanonicalUser. This condition cause the acl to register
+                # as unsupported, which is wrong.
+                break
             elif permission == "WRITE" and grantee == 'Group':
                 acl = 'public-read-write'
             else:
                 acl = 'unsupported'
+
+            slogger.debug("SWIFT_ACL_TRANSLATE acl: %s, permission: %s, grantee: %s" % (acl, permission, grantee))
 
     if acl == 'authenticated-read':
         return "Unsupported"
@@ -418,6 +427,7 @@ class BucketController(WSGIContext):
         conf = kwargs.get('conf', {})
         self.logger = get_logger(conf, log_route='swift3')
         self.location = conf.get('location', 'US')
+        self.logger.debug("BucketObject env: %s" % env)
 
     def GET(self, env, start_response):
         """
@@ -444,18 +454,27 @@ class BucketController(WSGIContext):
             env['QUERY_STRING'] += '&prefix=%s' % quote(args['prefix'])
         if 'delimiter' in args:
             env['QUERY_STRING'] += '&delimiter=%s' % quote(args['delimiter'])
+
+        # If the request is an ACL request, it needs to do a HEAD request.
+        if 'acl' in args:
+          env['REQUEST_METHOD'] = 'HEAD'
+
         body_iter = self._app_call(env)
         status = self._get_status_int()
         headers = dict(self._response_headers)
 
         if 'acl' in args:
-            return get_acl(self.account_name, headers)
+            ret = get_acl(self.account_name, headers)
+            self.logger.debug("POST-get_acl: HEADERS: %s, BODY: %s" % (ret.headers, ret.body))
+            return ret
 
         if 'versioning' in args:
             # Just report there is no versioning configured here.
             body = ('<VersioningConfiguration '
                 'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>')
             return Response(body=body, content_type="text/plain")
+
+        self.logger.debug("Bucket status: %s" % status)
 
         if status != HTTP_OK:
             if status == HTTP_UNAUTHORIZED:
@@ -529,7 +548,7 @@ class BucketController(WSGIContext):
             if 'QUERY_STRING' in env:
                 del env['QUERY_STRING']
 
-            translated_acl = swift_acl_translate(amz_acl)
+            translated_acl = swift_acl_translate(amz_acl, self.logger)
             if translated_acl == 'Unsupported':
                 return get_err_response('Unsupported')
             elif translated_acl == 'InvalidArgument':
@@ -552,7 +571,9 @@ class BucketController(WSGIContext):
             if 'acl' in args:
                 # We very likely have an XML-based ACL request.
                 body = env['wsgi.input'].readline().decode()
-                translated_acl = swift_acl_translate(body, xml=True)
+                self.logger.debug('OBJECT PUT ACL body: %s' % body)
+                translated_acl = swift_acl_translate(body, self.logger, xml=True)
+                self.logger.debug('OBJECT PUT traslated_acl: %s' % translated_acl)
                 if translated_acl == 'Unsupported':
                     return get_err_response('Unsupported')
                 elif translated_acl == 'InvalidArgument':
@@ -621,6 +642,7 @@ class ObjectController(WSGIContext):
         env['HTTP_X_AUTH_TOKEN_ALT'] = token[1]
         env['PATH_INFO'] = '/v1/%s/%s/%s' % (account_name, container_name,
                                              object_name)
+        self.logger.debug("ObjectController env: %s" % env)
 
     def GETorHEAD(self, env, start_response):
         if 'QUERY_STRING' in env:
@@ -637,7 +659,7 @@ class ObjectController(WSGIContext):
 
         status = self._get_status_int()
         headers = dict(self._response_headers)
-        self.logger.debug("Head: %s, Headers: %s", head, headers)
+        self.logger.debug("Headers: %s" % headers)
 
         if is_success(status):
             if 'acl' in args:
@@ -652,7 +674,7 @@ class ObjectController(WSGIContext):
                               'content-range', 'content-encoding',
                               'etag', 'last-modified'):
                     new_hdrs[key] = val
-            self.logger.debug("New Headers: %s", new_hdrs)
+            self.logger.debug("New Headers: %s" % new_hdrs)
             return Response(status=status, headers=new_hdrs, app_iter=app_iter)
         elif status == HTTP_UNAUTHORIZED:
             return get_err_response('AccessDenied')
