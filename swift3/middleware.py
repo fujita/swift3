@@ -366,6 +366,8 @@ class ServiceController(WSGIContext):
     """
     def __init__(self, env, app, account_name, token, **kwargs):
         WSGIContext.__init__(self, app)
+        conf = kwargs.get('conf', {})
+        self.logger = get_logger(conf, log_route='swift3')
         env['HTTP_X_AUTH_TOKEN'] = token[0]
         env['HTTP_X_AUTH_TOKEN_ALT'] = token[1]
         env['PATH_INFO'] = '/v1/%s' % account_name
@@ -413,6 +415,7 @@ class BucketController(WSGIContext):
         env['HTTP_X_AUTH_TOKEN_ALT'] = token[1]
         env['PATH_INFO'] = '/v1/%s/%s' % (account_name, container_name)
         conf = kwargs.get('conf', {})
+        self.logger = get_logger(conf, log_route='swift3')
         self.location = conf.get('location', 'US')
 
     def GET(self, env, start_response):
@@ -611,6 +614,8 @@ class ObjectController(WSGIContext):
         WSGIContext.__init__(self, app)
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
+        conf = kwargs.get('conf', {})
+        self.logger = get_logger(conf, log_route='swift3')
         env['HTTP_X_AUTH_TOKEN'] = token[0]
         env['HTTP_X_AUTH_TOKEN_ALT'] = token[1]
         env['PATH_INFO'] = '/v1/%s/%s/%s' % (account_name, container_name,
@@ -630,6 +635,7 @@ class ObjectController(WSGIContext):
 
         status = self._get_status_int()
         headers = dict(self._response_headers)
+        self.logger.debug("Head: %s, Headers: %s", head, headers)
 
         if is_success(status):
             if 'QUERY_STRING' in env:
@@ -648,6 +654,7 @@ class ObjectController(WSGIContext):
                               'content-range', 'content-encoding',
                               'etag', 'last-modified'):
                     new_hdrs[key] = val
+            self.logger.debug("New Headers: %s", new_hdrs)
             return Response(status=status, headers=new_hdrs, app_iter=app_iter)
         elif status == HTTP_UNAUTHORIZED:
             return get_err_response('AccessDenied')
