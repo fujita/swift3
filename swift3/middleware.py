@@ -243,7 +243,7 @@ def get_acl(account_name, headers):
     return Response(body=body, content_type="text/plain")
 
 
-def canonical_string(req):
+def canonical_string(req, alt=False):
     """
     Canonicalize a request to a token that can be signed.
     """
@@ -273,7 +273,9 @@ def canonical_string(req):
         # We doing this for replace '/' with %2F, because by default quote
         # don't replace '/' with %2F
         object_name = quote(unquote('/'.join(segs[2:])), safe='')
-        path = '/'.join(segs[:2] + [object_name])
+        # Generate the alternate path for the other token
+        if alt:
+          path = '/'.join(segs[:2] + [object_name])
     params = []
     for key, value in urlparse.parse_qsl(args, keep_blank_values=True):
         # list of keys must be lexicographically sorted
@@ -364,7 +366,8 @@ class ServiceController(WSGIContext):
     """
     def __init__(self, env, app, account_name, token, **kwargs):
         WSGIContext.__init__(self, app)
-        env['HTTP_X_AUTH_TOKEN'] = token
+        env['HTTP_X_AUTH_TOKEN'] = token[0]
+        env['HTTP_X_AUTH_TOKEN_ALT'] = token[1]
         env['PATH_INFO'] = '/v1/%s' % account_name
 
     def GET(self, env, start_response):
@@ -406,7 +409,8 @@ class BucketController(WSGIContext):
         WSGIContext.__init__(self, app)
         self.container_name = unquote(container_name)
         self.account_name = unquote(account_name)
-        env['HTTP_X_AUTH_TOKEN'] = token
+        env['HTTP_X_AUTH_TOKEN'] = token[0]
+        env['HTTP_X_AUTH_TOKEN_ALT'] = token[1]
         env['PATH_INFO'] = '/v1/%s/%s' % (account_name, container_name)
         conf = kwargs.get('conf', {})
         self.location = conf.get('location', 'US')
@@ -607,10 +611,10 @@ class ObjectController(WSGIContext):
         WSGIContext.__init__(self, app)
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
-        self.object_name = unquote(object_name)
-        env['HTTP_X_AUTH_TOKEN'] = token
+        env['HTTP_X_AUTH_TOKEN'] = token[0]
+        env['HTTP_X_AUTH_TOKEN_ALT'] = token[1]
         env['PATH_INFO'] = '/v1/%s/%s/%s' % (account_name, container_name,
-                                             self.object_name)
+                                             object_name)
 
     def GETorHEAD(self, env, start_response):
         if env['REQUEST_METHOD'] == 'HEAD':
@@ -698,9 +702,11 @@ class ObjectController(WSGIContext):
                 return get_err_response('InvalidURI')
 
         if 'HTTP_X_COPY_FROM' in env:
+            last_modified = datetime.datetime.strptime(self._response_header_value('Last-Modified'), "%a, %d %b %Y %H:%M:%S GMT")
             body = '<CopyObjectResult>' \
                    '<ETag>"%s"</ETag>' \
-                   '</CopyObjectResult>' % self._response_header_value('etag')
+                   '<LastModified>%s</LastModified>' \
+                   '</CopyObjectResult>' % (self._response_header_value('etag'), last_modified.isoformat())
             return Response(status=HTTP_OK, body=body)
 
         return Response(status=200, etag=self._response_header_value('etag'))
@@ -800,7 +806,8 @@ class Swift3Middleware(object):
                 return get_err_response('RequestTimeTooSkewed')(env,
                                                                 start_response)
 
-        token = base64.urlsafe_b64encode(canonical_string(req))
+        token = (base64.urlsafe_b64encode(canonical_string(req)),
+                  base64.urlsafe_b64encode(canonical_string(req, alt=True)))
 
         controller = controller(env, self.app, account, token, conf=self.conf,
                                 **path_parts)
