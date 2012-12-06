@@ -598,9 +598,10 @@ class ObjectController(WSGIContext):
         WSGIContext.__init__(self, app)
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
+        self.object_name = unquote(object_name)
         env['HTTP_X_AUTH_TOKEN'] = token
         env['PATH_INFO'] = '/v1/%s/%s/%s' % (account_name, container_name,
-                                             object_name)
+                                             self.object_name)
 
     def GETorHEAD(self, env, start_response):
         if env['REQUEST_METHOD'] == 'HEAD':
