@@ -2,3 +2,5 @@
 *.py[co]
 .DS_Store
 .idea
+build/
+dist/
