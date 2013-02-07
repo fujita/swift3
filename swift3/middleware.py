@@ -76,7 +76,7 @@ from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
 MAX_BUCKET_LISTING = 1000
 
 
-def get_err_response(code):
+def get_err_response(code, is_head=False):
     """
     Given an HTTP response code, create a properly formatted xml error response
 
@@ -123,6 +123,8 @@ def get_err_response(code):
     resp.body = '<?xml version="1.0" encoding="UTF-8"?>\r\n<Error>\r\n  ' \
                 '<Code>%s</Code>\r\n  <Message>%s</Message>\r\n</Error>\r\n' \
                 % (code, error_table[code][1])
+    if is_head:
+        resp.body = ''
     return resp
 
 
@@ -696,11 +698,11 @@ class ObjectController(WSGIContext):
                     new_hdrs[key] = val
             return Response(status=status, headers=new_hdrs, app_iter=app_iter)
         elif status == HTTP_UNAUTHORIZED:
-            return get_err_response('AccessDenied')
+            return get_err_response('AccessDenied', head)
         elif status == HTTP_NOT_FOUND:
-            return get_err_response('NoSuchKey')
+            return get_err_response('NoSuchKey', head)
         else:
-            return get_err_response('InvalidURI')
+            return get_err_response('InvalidURI', head)
 
     def HEAD(self, env, start_response):
         """
