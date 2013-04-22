@@ -244,8 +244,7 @@ def get_acl(account_name, headers):
                 '</AccessControlList>'
                 '</AccessControlPolicy>' %
                 (account_name, account_name, account_name, account_name))
-    return Response(body=body, content_type="text/plain")
-
+    return Response(status=200, body=body, content_type="text/plain")
 
 def canonical_string(req):
     """
@@ -276,27 +275,28 @@ def canonical_string(req):
         path += '?' + req.query_string
     if '?' in path:
         path, args = path.split('?', 1)
-	qstr = ''
-	qdict = dict(urlparse.parse_qsl(args, keep_blank_values=True))
-	#
-	# List of  sub-resources that must be maintained as part of the HMAC signature string.
-	# from http://docs.aws.amazon.com/AmazonS3/latest/dev/RESTAuthentication.html#RESTAuthenticationRequestCanonicalization
-	#
-	keywords = sorted(['acl', 'delete', 'lifecycle', 'location', 'logging', 'notification', 'partNumber',
-                        'policy', 'requestPayment', 'torrent', 'uploads', 'uploadId', 'versionId',
-                        'versioning', 'versions ', 'website'])
+        qstr = ''
+        qdict = dict(urlparse.parse_qsl(args, keep_blank_values=True))
+        #
+        # List of  sub-resources that must be maintained as part of the HMAC signature string.
+        # from http://docs.aws.amazon.com/AmazonS3/latest/dev/RESTAuthentication.html#RESTAuthenticationRequestCanonicalization
+        #
+        keywords = sorted(['acl', 'delete', 'lifecycle', 'location', 'logging', 'notification', 'partNumber',
+                           'policy', 'requestPayment', 'torrent', 'uploads', 'uploadId', 'versionId',
+                           'versioning', 'versions ', 'website'])
         for key in qdict:
             if key in keywords:
-		newstr = key
-		if qdict[key]:
-			newstr = newstr + '=%s' % qdict[key]
+                newstr = key
+                if qdict[key]:
+                    newstr = newstr + '=%s' % qdict[key]
 
-		if qstr == '': 
-			qstr = newstr
-		else:
-			qstr = qstr + '&%s' % newstr
-	if qstr != '':
-		return "%s%s?%s" % (buf, path, qstr)
+                if qstr == '': 
+                    qstr = newstr
+                else:
+                    qstr = qstr + '&%s' % newstr
+
+        if qstr != '':
+            return "%s%s?%s" % (buf, path, qstr)
 
     return buf + path
 
@@ -377,7 +377,7 @@ class ServiceController(WSGIContext):
     """
     Handles account level requests.
     """
-    def __init__(self, env, app, account_name, token, **kwargs):
+    def __init__(self, env, app, account_name, token, req, **kwargs):
         WSGIContext.__init__(self, app)
         env['HTTP_X_AUTH_TOKEN'] = token
         env['PATH_INFO'] = '/v1/%s' % account_name
@@ -411,13 +411,12 @@ class ServiceController(WSGIContext):
                         body=body)
         return resp
 
-
 class BucketController(WSGIContext):
     """
     Handles bucket request.
     """
     def __init__(self, env, app, account_name, token, container_name,
-                 **kwargs):
+                 req, **kwargs):
         WSGIContext.__init__(self, app)
         self.container_name = unquote(container_name)
         self.account_name = unquote(account_name)
@@ -426,6 +425,7 @@ class BucketController(WSGIContext):
         self.conf = kwargs.get('conf', {})
         self.location = self.conf.get('location', 'US')
         self.logger = get_logger(self.conf, log_route='swift3')
+        self.req = req
 
     def GET(self, env, start_response):
         """
@@ -456,13 +456,14 @@ class BucketController(WSGIContext):
         status = self._get_status_int()
         headers = dict(self._response_headers)
 
-        if 'acl' in args:
-            return get_acl(self.account_name, headers)
+        if is_success(status):
+            if 'acl' in args:
+                return get_acl(self.account_name, headers)
 
         if 'versioning' in args:
             # Just report there is no versioning configured here.
             body = ('<VersioningConfiguration '
-                'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>')
+                    'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>')
             return Response(body=body, content_type="text/plain")
 
         if status != HTTP_OK:
@@ -528,6 +529,7 @@ class BucketController(WSGIContext):
         """
         Handle PUT Bucket request
         """
+        req = Request(env)
         if 'HTTP_X_AMZ_ACL' in env:
             amz_acl = env['HTTP_X_AMZ_ACL']
             # Translate the Amazon ACL to something that can be
@@ -569,6 +571,7 @@ class BucketController(WSGIContext):
                     env[header] = acl
                 env['REQUEST_METHOD'] = 'POST'
 
+        #self.logger.debug('PUT container env: %s' % env)
         body_iter = self._app_call(env)
         status = self._get_status_int()
 
@@ -672,12 +675,13 @@ class BucketController(WSGIContext):
         if 'delete' in args:
             return self._delete_multiple_objects(env)
 
-	if 'uploads' in args:
-		# Pass it through, the s3multi upload helper will handle it.
-		return self.app(env,start_response)
-	if 'uploadId' in args:
-		# Pass it through, the s3multi upload helper will handle it.
-		return self.app(env, start_response)
+        if 'uploads' in args:
+            # Pass it through, the s3multi upload helper will handle it.
+            return self.app(env,start_response)
+
+        if 'uploadId' in args:
+            # Pass it through, the s3multi upload helper will handle it.
+            return self.app(env, start_response)
 
         return get_err_response('Unsupported')
 
@@ -686,7 +690,7 @@ class ObjectController(WSGIContext):
     Handles requests on objects
     """
     def __init__(self, env, app, account_name, token, container_name,
-                 object_name, **kwargs):
+                 object_name, req, **kwargs):
         WSGIContext.__init__(self, app)
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
@@ -696,30 +700,35 @@ class ObjectController(WSGIContext):
 
         self.conf = kwargs.get('conf', {})
         self.logger = get_logger(self.conf, log_route='swift3')
+        self.req = req
 
     def GETorHEAD(self, env, start_response):
         if 'QUERY_STRING' in env:
             args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
         else:
             args = {}
+
+        # Let s3multi handle it.
+        if 'uploadId' in args:
+            return self.app(env, start_response)
+
         if 'acl' in args:
             # ACL requests need to make a HEAD call rather than GET
             env['REQUEST_METHOD'] = 'HEAD'
+            env['SCRIPT_NAME'] = ''
+            env['QUERY_STRING'] = ''
 
-
-	# Let the s3multi uploader handle it.
-	if 'uploadId' in args:
-		return self.app(env, start_response)
-
-       	app_iter = self._app_call(env)
-	if env['REQUEST_METHOD'] == 'HEAD':
-		app_iter = None
-
+        app_iter = self._app_call(env)
         status = self._get_status_int()
         headers = dict(self._response_headers)
 
+        if env['REQUEST_METHOD'] == 'HEAD':
+            app_iter = None
+
         if is_success(status):
             if 'acl' in args:
+                # Change it back to GET or else the body wont be returned to the caller
+                env['REQUEST_METHOD'] = 'GET'
                 return get_acl(self.account_name, headers)
 
             new_hdrs = {}
@@ -792,16 +801,14 @@ class ObjectController(WSGIContext):
 
         return Response(status=200, etag=self._response_header_value('etag'))
 
-
     def POST(self, env, start_response):
-	return get_err_response('AccessDenied')
+        return get_err_response('AccessDenied')
 
     def DELETE(self, env, start_response):
         """
         Handle DELETE Object request
         """
-	# Pass it through so the s3multi middleware can handle it.
-	return self.app(env, start_response)
+        return self.app(env, start_response)
 
 class Swift3Middleware(object):
     """Swift3 S3 compatibility midleware"""
@@ -815,17 +822,18 @@ class Swift3Middleware(object):
         d = dict(container_name=container, object_name=obj)
 
         if 'QUERY_STRING' in env:
-           	args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
-	else:
-		args = {}
+            args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
+        else:
+            args = {}
 
         if container and obj:
-		if env['REQUEST_METHOD'] == 'POST':
-			if 'uploads' or 'uploadId' in args:
-				return BucketController, d
-		return ObjectController, d
+            if env['REQUEST_METHOD'] == 'POST':
+                if 'uploads' or 'uploadId' in args:
+                    return BucketController, d
+            return ObjectController, d
         elif container:
-		return BucketController, d
+            return BucketController, d
+
         return ServiceController, d
 
     def __call__(self, env, start_response):
@@ -838,6 +846,8 @@ class Swift3Middleware(object):
     def handle_request(self, env, start_response):
         req = Request(env)
         self.logger.debug('Calling Swift3 Middleware')
+        #self.logger.debug('S3 REQ: %s %s' % (req.method, req.url))
+        #self.logger.debug(' --- ')
 
         if 'AWSAccessKeyId' in req.params:
             try:
@@ -848,14 +858,17 @@ class Swift3Middleware(object):
                 return get_err_response('InvalidArgument')(env, start_response)
 
         if 'Authorization' not in req.headers:
+            self.logger.debug('Authorization not in headers')
             return self.app(env, start_response)
 
         try:
             keyword, info = req.headers['Authorization'].split(' ')
         except:
+            self.logger.debug('Failed to get Authorization header')
             return get_err_response('AccessDenied')(env, start_response)
 
         if keyword != 'AWS':
+            self.logger.debug('Failed to get AWS keyword')
             return get_err_response('AccessDenied')(env, start_response)
 
         try:
@@ -871,10 +884,11 @@ class Swift3Middleware(object):
         if 'Date' in req.headers:
             date = email.utils.parsedate(req.headers['Date'])
             if date is None and 'Expires' in req.params:
-		d = email.utils.formatdate(float(req.params['Expires']))
-		date = email.utils.parsedate(d)
+                d = email.utils.formatdate(float(req.params['Expires']))
+                date = email.utils.parsedate(d)
 
-	    if date is None:
+            if date is None:
+                self.logger.debug('Failed to get Date from headers')
                 return get_err_response('AccessDenied')(env, start_response)
 
             d1 = datetime.datetime(*date[0:6])
@@ -889,14 +903,17 @@ class Swift3Middleware(object):
                 return get_err_response('RequestTimeTooSkewed')(env,
                                                                 start_response)
 
-        token = base64.urlsafe_b64encode(canonical_string(req))
+        cstring = canonical_string(req)
+        token = base64.urlsafe_b64encode(cstring)
+
         controller = controller(env, self.app, account, token, conf=self.conf,
-                                **path_parts)
+                                req=req, **path_parts)
 
         if hasattr(controller, req.method):
             res = getattr(controller, req.method)(env, start_response)
         else:
             return get_err_response('InvalidURI')(env, start_response)
+
         return res(env, start_response)
 
 def filter_factory(global_conf, **local_conf):
