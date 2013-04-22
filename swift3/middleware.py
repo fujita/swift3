@@ -847,7 +847,7 @@ class Swift3Middleware(object):
     def handle_request(self, env, start_response):
         req = Request(env)
         self.logger.debug('Calling Swift3 Middleware')
-        self.logger.debug('S3 REQ: %s %s' % (req.method, req.url))
+        #self.logger.debug('S3 REQ: %s %s' % (req.method, req.url))
         #self.logger.debug(' --- ')
 
         if 'AWSAccessKeyId' in req.params:
