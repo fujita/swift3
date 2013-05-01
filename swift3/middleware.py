@@ -62,7 +62,6 @@ from simplejson import loads
 import email.utils
 import datetime
 import re
-import os
 
 from swift.common.utils import split_path
 from swift.common.utils import get_logger
@@ -73,10 +72,7 @@ from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
     HTTP_NOT_FOUND, HTTP_CONFLICT, HTTP_UNPROCESSABLE_ENTITY, is_success, \
     HTTP_NOT_IMPLEMENTED, HTTP_LENGTH_REQUIRED, HTTP_SERVICE_UNAVAILABLE
 
-import logging
-
 MAX_BUCKET_LISTING = 1000
-
 
 def get_err_response(code):
     """
@@ -244,7 +240,7 @@ def get_acl(account_name, headers):
                 '</AccessControlList>'
                 '</AccessControlPolicy>' %
                 (account_name, account_name, account_name, account_name))
-    return Response(status=200, body=body, content_type="text/plain")
+    return Response(body=body, content_type="text/plain")
 
 def canonical_string(req):
     """
@@ -378,7 +374,7 @@ class ServiceController(WSGIContext):
     """
     Handles account level requests.
     """
-    def __init__(self, env, app, account_name, token, req, **kwargs):
+    def __init__(self, env, app, account_name, token, **kwargs):
         WSGIContext.__init__(self, app)
         env['HTTP_X_AUTH_TOKEN'] = token
         env['PATH_INFO'] = '/v1/%s' % account_name
@@ -417,16 +413,14 @@ class BucketController(WSGIContext):
     Handles bucket request.
     """
     def __init__(self, env, app, account_name, token, container_name,
-                 req, **kwargs):
+                 **kwargs):
         WSGIContext.__init__(self, app)
         self.container_name = unquote(container_name)
         self.account_name = unquote(account_name)
         env['HTTP_X_AUTH_TOKEN'] = token
         env['PATH_INFO'] = '/v1/%s/%s' % (account_name, container_name)
-        self.conf = kwargs.get('conf', {})
-        self.location = self.conf.get('location', 'US')
-        self.logger = get_logger(self.conf, log_route='swift3')
-        self.req = req
+        conf = kwargs.get('conf', {})
+        self.location = conf.get('location', 'US')
 
     def GET(self, env, start_response):
         """
@@ -457,9 +451,8 @@ class BucketController(WSGIContext):
         status = self._get_status_int()
         headers = dict(self._response_headers)
 
-        if is_success(status):
-            if 'acl' in args:
-                return get_acl(self.account_name, headers)
+        if is_success(status) and 'ac' in args:
+            return get_acl(self.account_name, headers)
 
         if 'versioning' in args:
             # Just report there is no versioning configured here.
@@ -530,7 +523,6 @@ class BucketController(WSGIContext):
         """
         Handle PUT Bucket request
         """
-        req = Request(env)
         if 'HTTP_X_AMZ_ACL' in env:
             amz_acl = env['HTTP_X_AMZ_ACL']
             # Translate the Amazon ACL to something that can be
@@ -572,7 +564,6 @@ class BucketController(WSGIContext):
                     env[header] = acl
                 env['REQUEST_METHOD'] = 'POST'
 
-        #self.logger.debug('PUT container env: %s' % env)
         body_iter = self._app_call(env)
         status = self._get_status_int()
 
@@ -691,7 +682,7 @@ class ObjectController(WSGIContext):
     Handles requests on objects
     """
     def __init__(self, env, app, account_name, token, container_name,
-                 object_name, req, **kwargs):
+                 object_name, **kwargs):
         WSGIContext.__init__(self, app)
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
@@ -701,7 +692,6 @@ class ObjectController(WSGIContext):
 
         self.conf = kwargs.get('conf', {})
         self.logger = get_logger(self.conf, log_route='swift3')
-        self.req = req
 
     def GETorHEAD(self, env, start_response):
         if 'QUERY_STRING' in env:
@@ -809,7 +799,19 @@ class ObjectController(WSGIContext):
         """
         Handle DELETE Object request
         """
-        return self.app(env, start_response)
+        body_iter = self._app_call(env)
+        status = self._get_status_int()
+
+        if status != HTTP_NO_CONTENT:
+            if status == HTTP_UNAUTHORIZED:
+                return get_err_response('AccessDenied')
+            elif status == HTTP_NOT_FOUND:
+                return get_err_response('NoSuchKey')
+            else:
+                return get_err_response('InvalidURI')
+	resp = Response()
+	resp.status = HTTP_NO_CONTENT
+	return resp
 
 class Swift3Middleware(object):
     """Swift3 S3 compatibility midleware"""
@@ -847,8 +849,7 @@ class Swift3Middleware(object):
     def handle_request(self, env, start_response):
         req = Request(env)
         self.logger.debug('Calling Swift3 Middleware')
-        #self.logger.debug('S3 REQ: %s %s' % (req.method, req.url))
-        #self.logger.debug(' --- ')
+	self.logger.debug(req.__dict__)
 
         if 'AWSAccessKeyId' in req.params:
             try:
@@ -859,17 +860,14 @@ class Swift3Middleware(object):
                 return get_err_response('InvalidArgument')(env, start_response)
 
         if 'Authorization' not in req.headers:
-            #self.logger.debug('Authorization not in headers')
             return self.app(env, start_response)
 
         try:
             keyword, info = req.headers['Authorization'].split(' ')
         except:
-            #self.logger.debug('Failed to get Authorization header')
             return get_err_response('AccessDenied')(env, start_response)
 
         if keyword != 'AWS':
-            #self.logger.debug('Failed to get AWS keyword')
             return get_err_response('AccessDenied')(env, start_response)
 
         try:
@@ -889,7 +887,6 @@ class Swift3Middleware(object):
                 date = email.utils.parsedate(d)
 
             if date is None:
-                #self.logger.debug('Failed to get Date from headers')
                 return get_err_response('AccessDenied')(env, start_response)
 
             d1 = datetime.datetime(*date[0:6])
@@ -908,7 +905,7 @@ class Swift3Middleware(object):
         token = base64.urlsafe_b64encode(cstring)
 
         controller = controller(env, self.app, account, token, conf=self.conf,
-                                req=req, **path_parts)
+				**path_parts)
 
         if hasattr(controller, req.method):
             res = getattr(controller, req.method)(env, start_response)
