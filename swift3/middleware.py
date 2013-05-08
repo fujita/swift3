@@ -75,6 +75,10 @@ from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
 
 MAX_BUCKET_LISTING = 1000
 
+def tostr(string):
+    if isinstance(string, unicode):
+        return string.encode('utf8')
+    return string
 
 def get_err_response(code):
     """
@@ -495,12 +499,12 @@ class BucketController(WSGIContext):
                         'ied><ETag>%s</ETag><Size>%s</Size><StorageClass>STA'
                         'NDARD</StorageClass><Owner><ID>%s</ID><DisplayName>'
                         '%s</DisplayName></Owner></Contents>' %
-                        (xml_escape(unquote(i['name'])), i['last_modified'],
+                        (xml_escape(unquote(tostr(i['name']))), i['last_modified'],
                          i['hash'],
                          i['bytes'], self.account_name, self.account_name)
                          for i in objects[:max_keys] if 'subdir' not in i]),
                 "".join(['<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>'
-                         % xml_escape(i['subdir'])
+                         % xml_escape(tostr(i['subdir']))
                          for i in objects[:max_keys] if 'subdir' in i])))
         return Response(body=body, content_type='application/xml')
 
