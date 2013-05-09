@@ -499,7 +499,7 @@ class BucketController(WSGIContext):
                         'ied><ETag>%s</ETag><Size>%s</Size><StorageClass>STA'
                         'NDARD</StorageClass><Owner><ID>%s</ID><DisplayName>'
                         '%s</DisplayName></Owner></Contents>' %
-                        (xml_escape(unquote(tostr(i['name']))), i['last_modified'],
+                        (xml_escape(tostr(i['name'])), i['last_modified'],
                          i['hash'],
                          i['bytes'], self.account_name, self.account_name)
                          for i in objects[:max_keys] if 'subdir' not in i]),
