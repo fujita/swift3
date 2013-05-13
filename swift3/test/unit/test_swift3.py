@@ -76,6 +76,7 @@ class FakeAppBucket(FakeApp):
                         ('lily', '2011-01-05T02:19:14.275290', 0, 3909))
 
     def __call__(self, env, start_response):
+        self.env = env
         if env['REQUEST_METHOD'] == 'GET':
             if self.status == 200:
                 start_response(Response().status,
@@ -138,6 +139,7 @@ class FakeAppObject(FakeApp):
                                  'last-modified': '2011-01-05T02:19:14.275290'}
 
     def __call__(self, env, start_response):
+        self.env = env
         req = Request(env)
         if env['REQUEST_METHOD'] == 'GET' or env['REQUEST_METHOD'] == 'HEAD':
             if self.status == 200:
@@ -445,6 +447,28 @@ class TestSwift3(unittest.TestCase):
         resp = local_app(req.environ, local_app.app.do_start_response)
         dom = xml.dom.minidom.parseString("".join(resp))
         self.assertEquals(dom.firstChild.nodeName, 'VersioningConfiguration')
+
+    def test_bucket_with_nonascii_characters(self):
+        fake_app_object = FakeAppBucket()
+        local_app = swift3.filter_factory({})(fake_app_object)
+        req = Request.blank('/bucket name',
+                            headers={'Authorization': 'AWS test:hmac'})
+        self.assertEquals(req.environ['PATH_INFO'], '/bucket name')
+        local_app(req.environ, start_response)
+        # Checking PATH_INFO is setted ok in ObjectController
+        self.assertEquals(fake_app_object.env['PATH_INFO'],
+                          '/v1/test/bucket name')
+
+    def test_object_with_nonascii_characters(self):
+        fake_app_object = FakeAppObject()
+        local_app = swift3.filter_factory({})(fake_app_object)
+        req = Request.blank('/bucket_name/some name',
+                            headers={'Authorization': 'AWS test:hmac'})
+        self.assertEquals(req.environ['PATH_INFO'], '/bucket_name/some name')
+        local_app(req.environ, start_response)
+        # Checking PATH_INFO is setted ok in ObjectController
+        self.assertEquals(fake_app_object.env['PATH_INFO'],
+                          '/v1/test/bucket_name/some name')
 
     def _test_object_GETorHEAD(self, method):
         local_app = swift3.filter_factory({})(FakeAppObject())
