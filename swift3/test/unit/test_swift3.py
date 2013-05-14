@@ -448,25 +448,27 @@ class TestSwift3(unittest.TestCase):
         dom = xml.dom.minidom.parseString("".join(resp))
         self.assertEquals(dom.firstChild.nodeName, 'VersioningConfiguration')
 
-    def test_bucket_with_nonascii_characters(self):
+    def test_bucket_with_url_encoded_characters(self):
         fake_app_object = FakeAppBucket()
         local_app = swift3.filter_factory({})(fake_app_object)
         req = Request.blank('/bucket name',
                             headers={'Authorization': 'AWS test:hmac'})
+        # PATH_INFO contains path unquoted
         self.assertEquals(req.environ['PATH_INFO'], '/bucket name')
         local_app(req.environ, start_response)
-        # Checking PATH_INFO is setted ok in ObjectController
+        # Checking PATH_INFO is setted ok in ObjectController, still unquoted
         self.assertEquals(fake_app_object.env['PATH_INFO'],
                           '/v1/test/bucket name')
 
-    def test_object_with_nonascii_characters(self):
+    def test_object_with_url_encoded_characters(self):
         fake_app_object = FakeAppObject()
         local_app = swift3.filter_factory({})(fake_app_object)
         req = Request.blank('/bucket_name/some name',
                             headers={'Authorization': 'AWS test:hmac'})
+        # PATH_INFO contains path unquoted
         self.assertEquals(req.environ['PATH_INFO'], '/bucket_name/some name')
         local_app(req.environ, start_response)
-        # Checking PATH_INFO is setted ok in ObjectController
+        # Checking PATH_INFO is setted ok in ObjectController, still unquoted
         self.assertEquals(fake_app_object.env['PATH_INFO'],
                           '/v1/test/bucket_name/some name')
 
