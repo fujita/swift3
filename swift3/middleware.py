@@ -75,6 +75,10 @@ from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
 
 MAX_BUCKET_LISTING = 1000
 
+def tostr(string):
+    if isinstance(string, unicode):
+        return string.encode('utf8')
+    return string
 
 def get_err_response(code):
     """
@@ -380,7 +384,7 @@ class ServiceController(WSGIContext):
     def __init__(self, env, app, account_name, token, **kwargs):
         WSGIContext.__init__(self, app)
         env['HTTP_X_AUTH_TOKEN'] = token
-        env['PATH_INFO'] = '/v1/%s' % account_name
+        env['PATH_INFO'] = unquote('/v1/%s' % account_name)
 
     def GET(self, env, start_response):
         """
@@ -422,7 +426,7 @@ class BucketController(WSGIContext):
         self.container_name = unquote(container_name)
         self.account_name = unquote(account_name)
         env['HTTP_X_AUTH_TOKEN'] = token
-        env['PATH_INFO'] = '/v1/%s/%s' % (account_name, container_name)
+        env['PATH_INFO'] = unquote('/v1/%s/%s' % (account_name, container_name))
         conf = kwargs.get('conf', {})
         self.location = conf.get('location', 'US')
 
@@ -514,12 +518,12 @@ class BucketController(WSGIContext):
                         'ied><ETag>%s</ETag><Size>%s</Size><StorageClass>STA'
                         'NDARD</StorageClass><Owner><ID>%s</ID><DisplayName>'
                         '%s</DisplayName></Owner></Contents>' %
-                        (xml_escape(unquote(i['name'])), i['last_modified'],
+                        (xml_escape(tostr(i['name'])), i['last_modified'],
                          i['hash'],
                          i['bytes'], self.account_name, self.account_name)
                          for i in objects[:max_keys] if 'subdir' not in i]),
                 "".join(['<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>'
-                         % xml_escape(i['subdir'])
+                         % xml_escape(tostr(i['subdir']))
                          for i in objects[:max_keys] if 'subdir' in i])))
         return Response(body=body, content_type='application/xml')
 
@@ -691,8 +695,8 @@ class ObjectController(WSGIContext):
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
         env['HTTP_X_AUTH_TOKEN'] = token
-        env['PATH_INFO'] = '/v1/%s/%s/%s' % (account_name, container_name,
-                                             object_name)
+        env['PATH_INFO'] = unquote('/v1/%s/%s/%s' % (account_name,
+                                   container_name, object_name))
 
     def GETorHEAD(self, env, start_response):
         if 'QUERY_STRING' in env:
