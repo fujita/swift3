@@ -16,7 +16,7 @@
 """
 The swift3 middleware will emulate the S3 REST api on top of swift.
 
-The following opperations are currently supported:
+The following operations are currently supported:
 
     * GET Service
     * DELETE Bucket
@@ -264,25 +264,38 @@ def canonical_string(req):
     for k in sorted(key.lower() for key in amz_headers):
         buf += "%s:%s\n" % (k, amz_headers[k])
 
-    path = req.path_qs
-    args = ''
+    path = req.path
+    if req.query_string:
+        path += '?' + req.query_string
     if '?' in path:
         path, args = path.split('?', 1)
-    segs = path.split('/')
-    if len(segs) > 2 and segs[2]:  # segs[2] is object name
-        # We doing this for replace '/' with %2F, because by default quote
-        # don't replace '/' with %2F
-        object_name = quote(unquote('/'.join(segs[2:])), safe='')
-        path = '/'.join(segs[:2] + [object_name])
-    params = []
-    for key, value in urlparse.parse_qsl(args, keep_blank_values=True):
-        # list of keys must be lexicographically sorted
-        if key in ('acl', 'location', 'logging', 'requestPayment',
-                   'torrent', 'versionId', 'versioning', 'versions'):
-            params.append('%s=%s' % (key, value) if value else key)
-    if params:
-        return "%s%s?%s" % (buf, path, '&'.join(params))
+        for key in urlparse.parse_qs(args, keep_blank_values=True):
+            if key in ('acl', 'logging', 'torrent', 'location',
+                       'requestPayment', 'versioning'):
+                return "%s%s?%s" % (buf, path, key)
     return buf + path
+
+#    path = req.path_qs
+#    args = ''
+#    if '?' in path:
+#        path, args = path.split('?', 1)
+##    segs = path.split('/')
+##    if len(segs) > 2 and segs[2]:  # segs[2] is object name
+##        # We doing this for replace '/' with %2F, because by default quote
+##        # don't replace '/' with %2F
+##        object_name = quote(unquote('/'.join(segs[2:])), safe='')
+##        path = '/'.join(segs[:2] + [object_name])
+#    params = []
+#    for key, value in urlparse.parse_qsl(args, keep_blank_values=True):
+#        # list of keys must be lexicographically sorted
+#        if key in ('acl', 'lifecycle', 'location', 'logging', 'notification',
+#                   'partNumber', 'policy', 'requestPayment', 'torrent',
+#                   'uploadId', 'uploads', 'versionId', 'versioning',
+#                   'versions', 'website'):
+#            params.append('%s=%s' % (key, value) if value else key)
+#    if params:
+#        return "%s%s?%s" % (buf, path, '&'.join(params))
+#    return buf + path
 
 
 def swift_acl_translate(acl, group='', user='', xml=False):
