@@ -257,7 +257,7 @@ def get_acl(account_name, headers):
     return Response(body=body, content_type="text/plain")
 
 
-def canonical_string(req):
+def canonical_string(self, req):
     """
     Canonicalize a request to a token that can be signed.
     """
@@ -282,6 +282,15 @@ def canonical_string(req):
     # When using older version, swift3 uses req.path of swob instead
     # of it.
     path = req.environ.get('RAW_PATH_INFO', req.path)
+
+    # Add container name from HTTP_HOST to path if presented
+    if self.vhoststyle_enabled and req.environ['HTTP_HOST']:
+        cnt_from_host = re.match( r'^(.+)?\.'+self.vhoststyle_domain+
+                                 '(?::\d+)?', req.environ.get('HTTP_HOST'),
+                                 re.I)
+        if cnt_from_host is not None and cnt_from_host.group(1):
+            path = "/" + cnt_from_host.group(1) + path
+
     if req.query_string:
         path += '?' + req.query_string
     if '?' in path:
@@ -848,11 +857,28 @@ class Swift3Middleware(object):
     def __init__(self, app, conf, *args, **kwargs):
         self.app = app
         self.conf = conf
+        self.vhoststyle_enabled = bool(int(conf.get('vhoststyle_enabled',
+                                                    '0')))
+        self.vhoststyle_domain = conf.get('vhoststyle_domain',
+                                          'swift.localhost').replace('.', '\.')
         self.logger = get_logger(self.conf, log_route='swift3')
 
-    def get_controller(self, env, path):
+    def get_controller(self, env, req):
+        path = req.path
+
+        # Add container name from HTTP_HOST to path if presented
+        if self.vhoststyle_enabled and req.environ['HTTP_HOST']:
+            cnt_from_host = re.match( r'^(.+)?\.'+self.vhoststyle_domain+
+                                     '(?::\d+)?', req.environ.get('HTTP_HOST'),
+                                     re.I)
+            if cnt_from_host is not None and cnt_from_host.group(1):
+                self.logger.debug("S3's request is in vhost-style (container " +
+                                  "name is '%s')" % cnt_from_host.group(1))
+                path = "/" + cnt_from_host.group(1) + path
+            
         container, obj = split_path(path, 0, 2, True)
-        d = dict(container_name=container, object_name=unquote(obj) if obj is not None else obj)
+        d = dict(container_name=container,
+                 object_name=unquote(obj) if obj is not None else obj)
 
         if 'QUERY_STRING' in env:
             args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
@@ -879,6 +905,10 @@ class Swift3Middleware(object):
     def handle_request(self, env, start_response):
         req = Request(env)
         self.logger.debug('Calling Swift3 Middleware')
+        if self.vhoststyle_enabled:
+            self.logger.debug("Virtual hosted-style enabled for Swift3 " +
+                              "middleware with base domain '%s'" % 
+                              self.vhoststyle_domain.replace('\.', '.'))
         self.logger.debug(req.__dict__)
 
         if 'AWSAccessKeyId' in req.params:
@@ -906,7 +936,7 @@ class Swift3Middleware(object):
             return get_err_response('InvalidArgument')(env, start_response)
 
         try:
-            controller, path_parts = self.get_controller(env, req.path)
+            controller, path_parts = self.get_controller(env, req)
         except ValueError:
             return get_err_response('InvalidURI')(env, start_response)
 
@@ -941,7 +971,7 @@ class Swift3Middleware(object):
                     return get_err_response('RequestTimeTooSkewed')(
                         env, start_response)
 
-        token = base64.urlsafe_b64encode(canonical_string(req))
+        token = base64.urlsafe_b64encode(canonical_string(self, req))
 
         controller = controller(env, self.app, account, token, conf=self.conf,
                                 **path_parts)
