@@ -13,17 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# flake8: noqa
+
 import unittest
 from datetime import datetime
 import cgi
 import hashlib
 import base64
+import urllib
 
 import xml.dom.minidom
 import simplejson
 
 from swift.common.swob import Request, Response, HTTPUnauthorized, \
-    HTTPCreated,HTTPNoContent, HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
+    HTTPCreated, HTTPNoContent, HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPConflict, HTTPForbidden, HTTPRequestEntityTooLarge
 
 from swift3 import middleware as swift3
@@ -109,6 +112,11 @@ class FakeAppBucket(FakeApp):
                 start_response(HTTPForbidden().status, [])
             elif self.status == 202:
                 start_response(HTTPAccepted().status, [])
+            else:
+                start_response(HTTPBadRequest().status, [])
+        elif env['REQUEST_METHOD'] == 'POST':
+            if self.status == 204:
+                start_response(HTTPNoContent().status, [])
             else:
                 start_response(HTTPBadRequest().status, [])
         elif env['REQUEST_METHOD'] == 'DELETE':
@@ -200,7 +208,7 @@ class TestSwift3(unittest.TestCase):
         resp = self.app(req.environ, start_response)
         self.assertEquals(resp, 'FAKE APP')
 
-    def test_bad_format_authorization(self):
+    def test_bad_format_authorization_no_info(self):
         req = Request.blank('/something',
                             headers={'Authorization': 'hoge'})
         resp = self.app(req.environ, start_response)
@@ -208,6 +216,15 @@ class TestSwift3(unittest.TestCase):
         self.assertEquals(dom.firstChild.nodeName, 'Error')
         code = dom.getElementsByTagName('Code')[0].childNodes[0].nodeValue
         self.assertEquals(code, 'AccessDenied')
+
+    def test_bad_format_authorization_with_bad_info(self):
+        req = Request.blank('/something',
+                            headers={'Authorization': 'AWS poge'})
+        resp = self.app(req.environ, start_response)
+        dom = xml.dom.minidom.parseString("".join(resp))
+        self.assertEquals(dom.firstChild.nodeName, 'Error')
+        code = dom.getElementsByTagName('Code')[0].childNodes[0].nodeValue
+        self.assertEquals(code, 'InvalidArgument')
 
     def test_bad_method(self):
         req = Request.blank('/',
@@ -390,7 +407,14 @@ class TestSwift3(unittest.TestCase):
         self.assertEquals(code, 'AccessDenied')
         code = self._test_method_error(FakeAppBucket, 'PUT', '/bucket', 403)
         self.assertEquals(code, 'AccessDenied')
+        # S3 doesn't allow a PUT to an already-existing bucket with no ACL
+        # header and no "acl" query param
         code = self._test_method_error(FakeAppBucket, 'PUT', '/bucket', 202)
+        self.assertEquals(code, 'BucketAlreadyExists')
+        # S3 doesn't allow a PUT to an already-existing bucket with ONLY the
+        # canned-acl header (and no "acl" query param)
+        code = self._test_method_error(FakeAppBucket, 'PUT', '/bucket', 202,
+                                       {'X-Amz-Acl': 'public-read'})
         self.assertEquals(code, 'BucketAlreadyExists')
         code = self._test_method_error(FakeAppBucket, 'PUT', '/bucket', 0)
         self.assertEquals(code, 'InvalidURI')
@@ -400,6 +424,16 @@ class TestSwift3(unittest.TestCase):
         req = Request.blank('/bucket',
                             environ={'REQUEST_METHOD': 'PUT'},
                             headers={'Authorization': 'AWS test:tester:hmac'})
+        resp = local_app(req.environ, local_app.app.do_start_response)
+        self.assertEquals(local_app.app.response_args[0].split()[0], '200')
+
+    def test_bucket_PUT_acl_to_existing_container(self):
+        local_app = swift3.filter_factory({})(FakeAppBucket(204))
+        req = Request.blank('/bucket?acl',
+                            environ={'REQUEST_METHOD': 'PUT'},
+                            headers={
+                                'Authorization': 'AWS test:tester:hmac',
+                                'X-Amz-Acl': 'public-read'})
         resp = local_app(req.environ, local_app.app.do_start_response)
         self.assertEquals(local_app.app.response_args[0].split()[0], '200')
 
@@ -424,7 +458,7 @@ class TestSwift3(unittest.TestCase):
         self.assertEquals(local_app.app.response_args[0].split()[0], '204')
 
     def _check_acl(self, owner, resp):
-        dom = xml.dom.minidom.parseString("".join(resp))
+        dom = xml.dom.minidom.parseString(''.join(resp))
         self.assertEquals(dom.firstChild.nodeName, 'AccessControlPolicy')
         name = dom.getElementsByTagName('Permission')[0].childNodes[0].nodeValue
         self.assertEquals(name, 'FULL_CONTROL')
@@ -472,6 +506,8 @@ class TestSwift3(unittest.TestCase):
 
         if method == 'GET':
             self.assertEquals(''.join(resp), local_app.app.object_body)
+        else:
+            self.assertEquals(''.join(resp), '')
 
     def test_object_HEAD(self):
         self._test_object_GETorHEAD('HEAD')
@@ -531,7 +567,7 @@ class TestSwift3(unittest.TestCase):
                             headers={'Authorization': 'AWS test:tester:hmac',
                                      'x-amz-storage-class': 'REDUCED_REDUNDANCY',
                                      'Content-MD5': 'Gyz1NfJ3Mcl0NDZFo5hTKA=='})
-        req.date = datetime.now()
+        req.date = datetime.utcnow()
         req.content_type = 'text/plain'
         resp = local_app(req.environ, local_app.app.do_start_response)
         self.assertEquals(local_app.app.response_args[0].split()[0], '200')
@@ -545,7 +581,7 @@ class TestSwift3(unittest.TestCase):
         class FakeApp(object):
             def __call__(self, env, start_response):
                 self.req = Request(env)
-                start_response('200 OK', [])
+                start_response('201 OK', [])
                 return []
         app = FakeApp()
         local_app = swift3.filter_factory({})(app)
@@ -556,7 +592,7 @@ class TestSwift3(unittest.TestCase):
                                  'X-Amz-Meta-Something': 'oh hai',
                                  'X-Amz-Copy-Source': '/some/source',
                                  'Content-MD5': 'ffoHqOWd280dyE1MT4KuoQ=='})
-        req.date = datetime.now()
+        req.date = datetime.utcnow()
         req.content_type = 'text/plain'
         resp = local_app(req.environ, lambda *args: None)
         self.assertEquals(app.req.headers['ETag'],
@@ -677,13 +713,17 @@ class TestSwift3(unittest.TestCase):
                 return []
         app = FakeApp()
         local_app = swift3.filter_factory({})(app)
-        req = Request.blank('/bucket/object?Signature=X&Expires=Y&'
-                'AWSAccessKeyId=Z', environ={'REQUEST_METHOD': 'GET'})
-        req.headers['Date'] = datetime.utcnow()
+        dt = datetime.utcnow()
+        dt_formatted = dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        req = Request.blank(
+            '/bucket/object?Signature=X&Expires=%s&AWSAccessKeyId=Z' % (
+                urllib.quote(dt_formatted)),
+            environ={'REQUEST_METHOD': 'GET'})
+        req.date = dt
         req.content_type = 'text/plain'
         resp = local_app(req.environ, lambda *args: None)
-        self.assertEquals(req.headers['Authorization'], 'AWS Z:X')
-        self.assertEquals(req.headers['Date'], 'Y')
+        self.assertEquals(app.req.headers['Authorization'], 'AWS Z:X')
+        self.assertEquals(app.req.headers['Date'], dt_formatted)
 
     def test_token_generation(self):
         req = Request.blank('/bucket/object?uploadId=123456789abcdef'
