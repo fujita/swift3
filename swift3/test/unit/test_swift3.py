@@ -458,9 +458,7 @@ class TestSwift3(unittest.TestCase):
         self.assertEquals(local_app.app.response_args[0].split()[0], '204')
 
     def _check_acl(self, owner, resp):
-        xml_string = ''.join(resp)
-        import sys; print >>sys.stderr, 'xml_string: %s' % xml_string
-        dom = xml.dom.minidom.parseString(xml_string)
+        dom = xml.dom.minidom.parseString(''.join(resp))
         self.assertEquals(dom.firstChild.nodeName, 'AccessControlPolicy')
         name = dom.getElementsByTagName('Permission')[0].childNodes[0].nodeValue
         self.assertEquals(name, 'FULL_CONTROL')
