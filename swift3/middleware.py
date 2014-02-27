@@ -84,6 +84,16 @@ ALLOWED_SUB_RESOURCES = sorted([
     'versionId', 'versioning', 'versions ', 'website'
 ])
 
+# Even in the AWS docs, some XML has a trailing slash in here, and some
+# doesn't.  Just in case that somehow matters...
+AWS_XML_NS = 'xmlns="http://doc.s3.amazonaws.com/2006-03-01"'
+AWS_XML_NS2 = 'xmlns="http://doc.s3.amazonaws.com/2006-03-01/"'
+# This 3rd form per sample responses in AWS docs at
+# http://docs.aws.amazon.com/AmazonS3/latest/API/RESTBucketGET.html
+# Retrieved 2014-02-27
+AWS_XML_NS3 = 'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"'
+XML_HEADER = '<?xml version="1.0" encoding="UTF-8"?>'
+
 
 def get_err_response(code):
     """
@@ -93,48 +103,44 @@ def get_err_response(code):
     :returns: webob.response object
     """
     error_table = {
-        'AccessDenied':
-        (HTTP_FORBIDDEN, 'Access denied'),
-        'BucketAlreadyExists':
-        (HTTP_CONFLICT, 'The requested bucket name is not available'),
-        'BucketNotEmpty':
-        (HTTP_CONFLICT, 'The bucket you tried to delete is not empty'),
-        'InvalidArgument':
-        (HTTP_BAD_REQUEST, 'Invalid Argument'),
-        'InvalidBucketName':
-        (HTTP_BAD_REQUEST, 'The specified bucket is not valid'),
-        'InvalidURI':
-        (HTTP_BAD_REQUEST, 'Could not parse the specified URI'),
-        'InvalidDigest':
-        (HTTP_BAD_REQUEST, 'The Content-MD5 you specified was invalid'),
-        'BadDigest':
-        (HTTP_BAD_REQUEST, 'The Content-Length you specified was invalid'),
-        'EntityTooLarge':
-        (HTTP_BAD_REQUEST, 'Your proposed upload exceeds the maximum '
+        'AccessDenied': (HTTP_FORBIDDEN, 'Access denied'),
+        'BucketAlreadyExists': (
+            HTTP_CONFLICT, 'The requested bucket name is not available'),
+        'BucketNotEmpty': (
+            HTTP_CONFLICT, 'The bucket you tried to delete is not empty'),
+        'InvalidArgument': (HTTP_BAD_REQUEST, 'Invalid Argument'),
+        'InvalidBucketName': (
+            HTTP_BAD_REQUEST, 'The specified bucket is not valid'),
+        'InvalidURI': (HTTP_BAD_REQUEST, 'Could not parse the specified URI'),
+        'InvalidDigest': (
+            HTTP_BAD_REQUEST, 'The Content-MD5 you specified was invalid'),
+        'BadDigest': (
+            HTTP_BAD_REQUEST, 'The Content-Length you specified was invalid'),
+        'EntityTooLarge': (
+            HTTP_BAD_REQUEST, 'Your proposed upload exceeds the maximum '
             'allowed object size.'),
-        'NoSuchBucket':
-        (HTTP_NOT_FOUND, 'The specified bucket does not exist'),
-        'SignatureDoesNotMatch':
-        (HTTP_FORBIDDEN, 'The calculated request signature does not '
-            'match your provided one'),
-        'RequestTimeTooSkewed':
-        (HTTP_FORBIDDEN, 'The difference between the request time and the'
-        ' current time is too large'),
-        'NoSuchKey':
-        (HTTP_NOT_FOUND, 'The resource you requested does not exist'),
-        'Unsupported':
-        (HTTP_NOT_IMPLEMENTED, 'The feature you requested is not yet'
-        ' implemented'),
-        'MissingContentLength':
-        (HTTP_LENGTH_REQUIRED, 'Length Required'),
-        'ServiceUnavailable':
-        (HTTP_SERVICE_UNAVAILABLE, 'Please reduce your request rate')}
+        'NoSuchBucket': (
+            HTTP_NOT_FOUND, 'The specified bucket does not exist'),
+        'SignatureDoesNotMatch': (
+            HTTP_FORBIDDEN, 'The calculated request signature does not match '
+            'your provided one'),
+        'RequestTimeTooSkewed': (
+            HTTP_FORBIDDEN, 'The difference between the request time and the '
+            'current time is too large'),
+        'NoSuchKey': (
+            HTTP_NOT_FOUND, 'The resource you requested does not exist'),
+        'Unsupported': (
+            HTTP_NOT_IMPLEMENTED, 'The feature you requested is not yet '
+            'implemented'),
+        'MissingContentLength': (HTTP_LENGTH_REQUIRED, 'Length Required'),
+        'ServiceUnavailable': (
+            HTTP_SERVICE_UNAVAILABLE, 'Please reduce your request rate')}
 
     resp = Response(content_type='text/xml')
     resp.status = error_table[code][0]
-    resp.body = '<?xml version="1.0" encoding="UTF-8"?>\r\n<Error>\r\n  ' \
-                '<Code>%s</Code>\r\n  <Message>%s</Message>\r\n</Error>\r\n' \
-                % (code, error_table[code][1])
+    resp.body = """%s
+        <Error><Code>%s</Code><Message>%s</Message></Error>
+    """ % (XML_HEADER, code, error_table[code][1])
     return resp
 
 
@@ -287,8 +293,8 @@ def canonical_string(req):
     if '?' in path:
         path, args = path.split('?', 1)
         params = []
-        for key, value in sorted(urlparse.parse_qsl(args,
-                                          keep_blank_values=True)):
+        for key, value in sorted(urlparse.parse_qsl(
+                args, keep_blank_values=True)):
             if key in ALLOWED_SUB_RESOURCES:
                 params.append('%s=%s' % (key, value) if value else key)
         if params:
@@ -397,14 +403,17 @@ class ServiceController(WSGIContext):
         containers = loads(''.join(list(body_iter)))
         # we don't keep the creation time of a backet (s3cmd doesn't
         # work without that) so we use something bogus.
-        body = '<?xml version="1.0" encoding="UTF-8"?>' \
-               '<ListAllMyBucketsResult ' \
-               'xmlns="http://doc.s3.amazonaws.com/2006-03-01">' \
-               '<Buckets>%s</Buckets>' \
-               '</ListAllMyBucketsResult>' \
-               % ("".join(['<Bucket><Name>%s</Name><CreationDate>'
-                           '2009-02-03T16:45:09.000Z</CreationDate></Bucket>'
-                           % xml_escape(i['name']) for i in containers]))
+        list_all_my_buckets_xml = """%s
+            <ListAllMyBucketsResult %s>
+                <Buckets>%s</Buckets>
+            </ListAllMyBucketsResult>
+        """
+        body = list_all_my_buckets_xml % (
+            XML_HEADER, AWS_XML_NS, "".join(
+                ['<Bucket><Name>%s</Name><CreationDate>'
+                 '2009-02-03T16:45:09.000Z</CreationDate></Bucket>'
+                 % xml_escape(i['name'])
+                 for i in containers]))
         resp = Response(status=HTTP_OK, content_type='application/xml',
                         body=body)
         return resp
@@ -480,9 +489,10 @@ class BucketController(WSGIContext):
 
         if 'versioning' in args:
             # Just report there is no versioning configured here.
-            body = ('<VersioningConfiguration '
-                    'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>')
-            return Response(body=body, content_type="text/plain")
+            body = '<VersioningConfiguration %s/>' % AWS_XML_NS2
+            # S3 responses don't seem to have any Content-Type header on these
+            # responses, but if they did, surely it would be application/xml
+            return Response(body=body, content_type="application/xml")
 
         if status != HTTP_OK:
             if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
@@ -493,9 +503,7 @@ class BucketController(WSGIContext):
                 return get_err_response('InvalidURI')
 
         if 'location' in args:
-            body = ('<?xml version="1.0" encoding="UTF-8"?>'
-                    '<LocationConstraint '
-                    'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"')
+            body = '%s<LocationConstraint %s' % (XML_HEADER, AWS_XML_NS2)
             if self.location == 'US':
                 body += '/>'
             else:
@@ -504,15 +512,12 @@ class BucketController(WSGIContext):
 
         if 'logging' in args:
             # logging disabled
-            body = ('<?xml version="1.0" encoding="UTF-8"?>'
-                    '<BucketLoggingStatus '
-                    'xmlns="http://doc.s3.amazonaws.com/2006-03-01" />')
+            body = '%s<BucketLoggingStatus %s />' % (
+                XML_HEADER, AWS_XML_NS)
             return Response(body=body, content_type='application/xml')
 
         objects = loads(''.join(list(body_iter)))
-        body = ('<?xml version="1.0" encoding="UTF-8"?>'
-                '<ListBucketResult '
-                'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
+        body = ('%s<ListBucketResult %s>'
                 '<Prefix>%s</Prefix>'
                 '<Marker>%s</Marker>'
                 '<Delimiter>%s</Delimiter>'
@@ -521,26 +526,30 @@ class BucketController(WSGIContext):
                 '<Name>%s</Name>'
                 '%s'
                 '%s'
-                '</ListBucketResult>' %
-                (
-                xml_escape(args.get('prefix', '')),
-                xml_escape(args.get('marker', '')),
-                xml_escape(args.get('delimiter', '')),
-                'true' if max_keys > 0 and len(objects) == (max_keys + 1) else
-                'false',
-                max_keys,
-                xml_escape(self.container_name),
-                "".join(['<Contents><Key>%s</Key><LastModified>%sZ</LastModif'
-                        'ied><ETag>%s</ETag><Size>%s</Size><StorageClass>STA'
-                        'NDARD</StorageClass><Owner><ID>%s</ID><DisplayName>'
-                        '%s</DisplayName></Owner></Contents>' %
-                        (xml_escape(unquote(i['name'])), i['last_modified'],
-                         i['hash'],
-                         i['bytes'], self.account_name, self.account_name)
-                         for i in objects[:max_keys] if 'subdir' not in i]),
-                "".join(['<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>'
-                         % xml_escape(i['subdir'])
-                         for i in objects[:max_keys] if 'subdir' in i])))
+                '</ListBucketResult>' % (
+                    XML_HEADER,
+                    AWS_XML_NS3,
+                    xml_escape(args.get('prefix', '')),
+                    xml_escape(args.get('marker', '')),
+                    xml_escape(args.get('delimiter', '')),
+                    'true' if max_keys > 0
+                    and len(objects) == (max_keys + 1) else 'false',
+                    max_keys,
+                    xml_escape(self.container_name),
+                    "".join(['<Contents><Key>%s</Key>'
+                             '<LastModified>%sZ</LastModified>'
+                             '<ETag>%s</ETag><Size>%s</Size>'
+                             '<StorageClass>STANDARD</StorageClass>'
+                             '<Owner><ID>%s</ID><DisplayName>'
+                             '%s</DisplayName></Owner></Contents>' % (
+                                 xml_escape(unquote(i['name'])),
+                                 i['last_modified'], i['hash'], i['bytes'],
+                                 self.account_name, self.account_name)
+                             for i in objects[:max_keys]
+                             if 'subdir' not in i]),
+                    "".join(['<CommonPrefixes><Prefix>%s</Prefix>'
+                             '</CommonPrefixes>' % xml_escape(i['subdir'])
+                             for i in objects[:max_keys] if 'subdir' in i])))
         return Response(body=body, content_type='application/xml')
 
     def PUT(self, env, start_response):
@@ -649,9 +658,7 @@ class BucketController(WSGIContext):
                    '    <Message>%s</Message>\r\n' \
                    '  </Error>\r\n' % (key, err_code, message)
 
-        body = '<?xml version="1.0" encoding="UTF-8"?>\r\n' \
-               '<DeleteResult ' \
-               'xmlns="http://doc.s3.amazonaws.com/2006-03-01">\r\n'
+        body = '%s\r\n<DeleteResult %s>\r\n' % (XML_HEADER, AWS_XML_NS)
         xml = env['wsgi.input'].read()
         for key, version in _object_key_iter(xml):
             if version is not None:
@@ -852,7 +859,8 @@ class Swift3Middleware(object):
 
     def get_controller(self, env, path):
         container, obj = split_path(path, 0, 2, True)
-        d = dict(container_name=container, object_name=unquote(obj) if obj is not None else obj)
+        d = {'container_name': container,
+             'object_name': unquote(obj) if obj is not None else obj}
 
         if 'QUERY_STRING' in env:
             args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
