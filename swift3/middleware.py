@@ -563,6 +563,9 @@ class BucketController(WSGIContext):
             # for ACLs, whereas S3 uses PUT.
             del env['HTTP_X_AMZ_ACL']
             if 'QUERY_STRING' in env:
+                args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
+                if 'acl' in args:
+                    env['REQUEST_METHOD'] = 'POST'
                 del env['QUERY_STRING']
 
             translated_acl = swift_acl_translate(amz_acl)
