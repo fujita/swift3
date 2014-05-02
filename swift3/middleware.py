@@ -530,7 +530,7 @@ class BucketController(WSGIContext):
                 'false',
                 max_keys,
                 xml_escape(self.container_name),
-                "".join(['<Contents><Key>%s</Key><LastModified>%sZ</LastModif'
+                "".join(['<Contents><Key>%s</Key><LastModified>%s</LastModif'
                         'ied><ETag>%s</ETag><Size>%s</Size><StorageClass>STA'
                         'NDARD</StorageClass><Owner><ID>%s</ID><DisplayName>'
                         '%s</DisplayName></Owner></Contents>' %
