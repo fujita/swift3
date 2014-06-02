@@ -45,7 +45,7 @@ If you use keystone:
 You also need to add the following if you use keystone (adjust port, host, protocol configurations for your environment):
 
     [filter:s3token]
-    paste.filter_factory = keystone.middleware.s3_token:filter_factory
+    paste.filter_factory = keystoneclient.middleware.s3_token:filter_factory
     auth_port = 35357
     auth_host = 127.0.0.1
     auth_protocol = http
